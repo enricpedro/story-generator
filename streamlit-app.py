@@ -75,9 +75,14 @@ def handle_streaming_response(response, prediction_id):
     """Handle a streaming response from Replicate API"""
     try:
         # If the response contains a URL for streaming, fetch the content from that URL
-        if "stream" in response and response["stream"]:
+        if "stream" in response and response["stream"] and isinstance(response["stream"], str):
             stream_url = response["stream"]
             st.write(f"Stream URL: {stream_url}")
+            
+            # Check if the URL is valid
+            if not stream_url.startswith('http'):
+                st.warning(f"Invalid stream URL: {stream_url}")
+                return wait_for_prediction(prediction_id)
             
             headers = {
                 "Accept": "text/event-stream",
@@ -91,7 +96,7 @@ def handle_streaming_response(response, prediction_id):
             if stream_response.status_code != 200:
                 st.error(f"Error: Stream API returned status code {stream_response.status_code}")
                 st.write("Response:", stream_response.text)
-                return None
+                return wait_for_prediction(prediction_id)
             
             full_text = ""
             for line in stream_response.iter_lines():
@@ -112,14 +117,34 @@ def handle_streaming_response(response, prediction_id):
                                 continue
             
             return {"output": full_text}
-        
-        # Otherwise, wait for the prediction to complete using regular polling
-        return wait_for_prediction(prediction_id)
+        else:
+            # Stream isn't available or is not a string, use regular polling
+            st.write("Streaming not available or invalid, falling back to polling")
+            return wait_for_prediction(prediction_id)
         
     except Exception as e:
         st.error(f"Error in handle_streaming_response: {str(e)}")
         # Fall back to regular polling
         return wait_for_prediction(prediction_id)
+
+def extract_image_prompts(script_data):
+    """Extract image prompts from script data safely"""
+    try:
+        all_prompts = []
+        if isinstance(script_data, dict) and "chapters" in script_data:
+            for chapter in script_data["chapters"]:
+                if isinstance(chapter, dict) and "image_prompts" in chapter and isinstance(chapter["image_prompts"], list):
+                    all_prompts.extend(chapter["image_prompts"])
+        
+        if not all_prompts:
+            # If no prompts found, create a default one
+            all_prompts = ["creative scene from the story"]
+            
+        return all_prompts
+    except Exception as e:
+        st.error(f"Error extracting image prompts: {str(e)}")
+        # Return a default prompt
+        return ["creative scene from the story"]
 
 def generate_script(theme, num_chapters, style_preference):
     """Generate script with Claude 3.7 Sonnet"""
@@ -154,7 +179,7 @@ def generate_script(theme, num_chapters, style_preference):
             "input": {
                 "prompt": prompt
             },
-            "stream": True
+            "stream": False  # Changed to False to avoid streaming issues
         }
     )
     
@@ -179,37 +204,48 @@ def generate_script(theme, num_chapters, style_preference):
         st.write("Full API response:", prediction)
         raise Exception("Invalid API response: missing 'id' field")
     
-    # Handle streaming response or wait for prediction to complete
-    prediction_output = handle_streaming_response(prediction, prediction["id"])
+    # Wait for the prediction to complete using regular polling
+    prediction = wait_for_prediction(prediction["id"])
     
     # Parse the JSON result from the output field
     try:
-        if prediction_output and "output" in prediction_output:
-            if isinstance(prediction_output["output"], str):
+        if "output" in prediction:
+            output = prediction["output"]
+            if isinstance(output, str):
                 # Try to parse string as JSON
                 try:
-                    script_data = json.loads(prediction_output["output"])
+                    script_data = json.loads(output)
                     return script_data
                 except json.JSONDecodeError:
                     # If not valid JSON, look for a JSON object in the string
-                    match = re.search(r'({[\s\S]*})', prediction_output["output"])
+                    match = re.search(r'({[\s\S]*})', output)
                     if match:
                         script_data = json.loads(match.group(1))
                         return script_data
                     else:
                         st.error("Could not extract JSON from output")
-                        st.write("Raw output:", prediction_output["output"])
-                        raise Exception("Failed to parse JSON from output")
+                        st.write("Raw output:", output)
+                        # Attempt to create a basic structure from the text
+                        st.warning("Attempting to create a basic script structure from the text")
+                        return {
+                            "title": f"Story about {theme}",
+                            "chapters": [
+                                {
+                                    "text": output,
+                                    "image_prompts": [theme]
+                                }
+                            ]
+                        }
             else:
                 # Direct JSON object
-                return prediction_output["output"]
+                return output
         else:
             st.error("No output field in prediction result")
-            st.write("Full prediction:", prediction_output)
+            st.write("Full prediction:", prediction)
             raise Exception("No output field in prediction result")
     except Exception as e:
         st.error(f"Error parsing script data: {str(e)}")
-        st.write("Raw output:", prediction_output.get("output", "No output available"))
+        st.write("Raw output:", prediction.get("output", "No output available"))
         raise Exception(f"Failed to parse script data: {str(e)}")
 
 def generate_image(prompt, theme, style_preference):
@@ -411,9 +447,9 @@ if submit_button and theme:
             
             # Step 2: Generate images
             status_text.text("Creating images...")
-            all_image_prompts = []
-            for chapter in script_data["chapters"]:
-                all_image_prompts.extend(chapter["image_prompts"])
+            
+            # Safely extract image prompts
+            all_image_prompts = extract_image_prompts(script_data)
             
             debug_container.write(f"Found {len(all_image_prompts)} image prompts")
             
@@ -435,10 +471,22 @@ if submit_button and theme:
             
             # Step 3: Generate audio
             status_text.text("Generating audio narration...")
-            full_text = script_data["title"] + "\n\n"
-            for chapter in script_data["chapters"]:
-                clean_text = re.sub(r'\[IMAGE:.*?\]', '', chapter["text"])
-                full_text += clean_text + "\n\n"
+            
+            # Safely construct the narration text
+            try:
+                full_text = script_data.get("title", f"Story about {theme}") + "\n\n"
+                
+                for chapter in script_data.get("chapters", []):
+                    if isinstance(chapter, dict) and "text" in chapter:
+                        clean_text = re.sub(r'\[IMAGE:.*?\]', '', chapter["text"])
+                        full_text += clean_text + "\n\n"
+                
+                # Limit text length if needed
+                if len(full_text) > 10000:  # Arbitrary limit to avoid API issues
+                    full_text = full_text[:10000] + "...\n\nStory continues."
+            except Exception as e:
+                debug_container.error(f"Error preparing narration text: {str(e)}")
+                full_text = f"A story about {theme}. Once upon a time..."
             
             debug_container.write("Generating audio narration...")
             
@@ -458,7 +506,7 @@ if submit_button and theme:
             st.session_state["audio_url"] = audio_url
             
             # Remove debug container after success
-            debug_container.empty()
+            # debug_container.empty()
             
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
@@ -467,35 +515,77 @@ if submit_button and theme:
 # Display results
 if "script_data" in st.session_state:
     script_data = st.session_state["script_data"]
-    generated_images = st.session_state["generated_images"]
-    audio_url = st.session_state["audio_url"]
+    generated_images = st.session_state.get("generated_images", [])
+    audio_url = st.session_state.get("audio_url")
     
-    st.header(script_data["title"])
+    # Display title
+    if isinstance(script_data, dict) and "title" in script_data:
+        st.header(script_data["title"])
+    else:
+        st.header(f"Story about {theme}")
     
     # Audio player
     if audio_url:
         st.subheader("Audio Narration")
-        st.audio(audio_url)
-        st.markdown(f"[Download Audio]({audio_url})")
+        try:
+            st.audio(audio_url)
+            st.markdown(f"[Download Audio]({audio_url})")
+        except Exception as e:
+            st.error(f"Error playing audio: {str(e)}")
+            st.markdown(f"[Open Audio URL]({audio_url})")
     
     # Display chapters with images
-    for chapter_idx, chapter in enumerate(script_data["chapters"]):
-        st.subheader(f"Chapter {chapter_idx + 1}")
-        
-        # Split the text by image markers and insert images between text segments
-        text_parts = re.split(r'\[IMAGE:.*?\]', chapter["text"])
-        image_count = len(text_parts) - 1  # One fewer images than text parts
-        
-        for i, text_part in enumerate(text_parts):
-            st.write(text_part)
+    if isinstance(script_data, dict) and "chapters" in script_data and isinstance(script_data["chapters"], list):
+        for chapter_idx, chapter in enumerate(script_data["chapters"]):
+            st.subheader(f"Chapter {chapter_idx + 1}")
             
-            # If there's an image after this text segment, display it
-            if i < image_count and i < len(generated_images):
-                image_idx = sum(len(script_data["chapters"][j]["image_prompts"]) for j in range(chapter_idx)) + i
-                if image_idx < len(generated_images):
-                    st.image(generated_images[image_idx]["url"], 
-                             caption=generated_images[image_idx]["prompt"],
-                             use_column_width=True)
+            if isinstance(chapter, dict) and "text" in chapter:
+                # Split the text by image markers
+                try:
+                    text_parts = re.split(r'\[IMAGE:.*?\]', chapter["text"])
+                    image_count = len(text_parts) - 1  # One fewer images than text parts
+                    
+                    for i, text_part in enumerate(text_parts):
+                        st.write(text_part)
+                        
+                        # If there's an image after this text segment, display it
+                        if i < image_count and generated_images:
+                            image_idx = 0
+                            try:
+                                # Calculate correct image index
+                                image_idx = sum(len(script_data["chapters"][j].get("image_prompts", [])) 
+                                               for j in range(chapter_idx) if j < len(script_data["chapters"])) + i
+                                               
+                                if image_idx < len(generated_images):
+                                    st.image(generated_images[image_idx]["url"], 
+                                             caption=generated_images[image_idx].get("prompt", "Story image"),
+                                             use_column_width=True)
+                            except Exception as e:
+                                st.error(f"Error displaying image {image_idx}: {str(e)}")
+                                # Try to display any available image
+                                if generated_images:
+                                    st.image(generated_images[0]["url"], 
+                                             caption="Story image",
+                                             use_column_width=True)
+                except Exception as e:
+                    # If splitting fails, just display the whole text
+                    st.write(chapter["text"])
+                    st.error(f"Error splitting text for images: {str(e)}")
+                    
+                    # Display any available images
+                    if generated_images:
+                        st.image(generated_images[0]["url"], 
+                                 caption="Story image",
+                                 use_column_width=True)
+            else:
+                st.error(f"Invalid chapter format: {chapter}")
+    else:
+        # If script_data doesn't have the expected structure, display it as raw text
+        st.write(script_data)
+        
+        # Display any generated images
+        for img in generated_images:
+            st.image(img["url"], caption=img.get("prompt", "Story image"), use_column_width=True)
     
     # Button to create another story
     if st.button("Create Another Story"):
