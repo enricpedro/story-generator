@@ -304,51 +304,123 @@ def generate_image(prompt, theme, style_preference):
 
 def generate_audio(text, voice):
     """Generate audio with Kokoro"""
-    response = requests.post(
-        "https://api.replicate.com/v1/predictions",
-        headers={
-            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
-            "Content-Type": "application/json",
-            "Prefer": "wait"
-        },
-        json={
-            "version": "jaaari/kokoro-82m:f559560eb822dc509045f3921a192123491b9173d4bf3daab2169b71c7a13",
-            "input": {
-                "text": text,
-                "voice": voice,
-                "speed": 1.0
+    # Ensure text is a string
+    if not isinstance(text, str):
+        text = str(text)
+        
+    # Limit text length if needed to avoid API issues
+    if len(text) > 5000:
+        text = text[:5000] + "... (text truncated)"
+    
+    try:
+        # First check if we can find the model
+        st.write("Querying available models...")
+        models_response = requests.get(
+            "https://api.replicate.com/v1/models/jaaari/kokoro-82m",
+            headers={
+                "Authorization": f"Bearer {REPLICATE_API_TOKEN}"
             }
-        }
-    )
-    
-    # Check if the request was created successfully (201 is the expected response code)
-    if response.status_code not in [200, 201]:
-        st.error(f"Error: API returned status code {response.status_code}")
-        st.write("Response:", response.text)
-        raise Exception(f"API error: {response.status_code} - {response.text}")
-    
-    prediction = response.json()
-    
-    # Check for errors in the response
-    if "error" in prediction and prediction["error"]:
-        raise Exception(f"Error creating prediction: {prediction['error']}")
-    
-    # Check if 'id' exists in the response
-    if "id" not in prediction:
-        st.error("API response does not contain an 'id' field")
-        st.write("Full API response:", prediction)
-        raise Exception("Invalid API response: missing 'id' field")
-    
-    # Wait for the prediction to complete
-    prediction = wait_for_prediction(prediction["id"])
-    
-    # Extract the output URL
-    if "output" in prediction:
-        return prediction["output"]
-    else:
-        st.error("No output URL in prediction result")
-        st.write("Full prediction:", prediction)
-        raise Exception("No output URL in prediction result")
+        )
+        
+        if models_response.status_code != 200:
+            st.error(f"Error accessing model: {models_response.status_code}")
+            st.write("Response:", models_response.text)
+            # Try a different approach with the direct model endpoint
+            st.write("Trying alternative approach...")
+            
+            response = requests.post(
+                "https://api.replicate.com/v1/predictions",
+                headers={
+                    "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+                    "Content-Type": "application/json",
+                    "Prefer": "wait"
+                },
+                json={
+                    "version": "jaaari/kokoro-82m:dfdf537ba482b029e0a761699e6f55e9162cfd159270bfe0e44857caa5f275a6",
+                    "input": {
+                        "text": text,
+                        "voice": voice
+                    }
+                }
+            )
+        else:
+            # Model exists, get latest version
+            model_data = models_response.json()
+            st.write("Model info:", model_data)
+            
+            # Get the latest version
+            versions_response = requests.get(
+                "https://api.replicate.com/v1/models/jaaari/kokoro-82m/versions",
+                headers={
+                    "Authorization": f"Bearer {REPLICATE_API_TOKEN}"
+                }
+            )
+            
+            if versions_response.status_code != 200:
+                st.error(f"Error getting versions: {versions_response.status_code}")
+                st.write("Using hardcoded version...")
+                latest_version = "dfdf537ba482b029e0a761699e6f55e9162cfd159270bfe0e44857caa5f275a6"
+            else:
+                versions = versions_response.json()
+                if "results" in versions and len(versions["results"]) > 0:
+                    latest_version = versions["results"][0]["id"]
+                    st.write(f"Latest version: {latest_version}")
+                else:
+                    latest_version = "dfdf537ba482b029e0a761699e6f55e9162cfd159270bfe0e44857caa5f275a6"
+                    st.write(f"No versions found, using default: {latest_version}")
+                
+            # Make the prediction call
+            response = requests.post(
+                "https://api.replicate.com/v1/predictions",
+                headers={
+                    "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+                    "Content-Type": "application/json",
+                    "Prefer": "wait"
+                },
+                json={
+                    "version": f"jaaari/kokoro-82m:{latest_version}",
+                    "input": {
+                        "text": text,
+                        "voice": voice
+                    }
+                }
+            )
+        
+        # Check if the request was created successfully (201 is the expected response code)
+        if response.status_code not in [200, 201]:
+            st.error(f"Error: API returned status code {response.status_code}")
+            st.write("Response:", response.text)
+            # We'll return None instead of raising an exception so the app can continue
+            return None
+        
+        prediction = response.json()
+        st.write("Kokoro API response:", prediction)
+        
+        # Check for errors in the response
+        if "error" in prediction and prediction["error"]:
+            st.error(f"Error creating prediction: {prediction['error']}")
+            return None
+        
+        # Check if 'id' exists in the response
+        if "id" not in prediction:
+            st.error("API response does not contain an 'id' field")
+            st.write("Full API response:", prediction)
+            return None
+        
+        # Wait for the prediction to complete
+        prediction = wait_for_prediction(prediction["id"])
+        
+        # Extract the output URL
+        if "output" in prediction:
+            return prediction["output"]
+        else:
+            st.error("No output URL in prediction result")
+            st.write("Full prediction:", prediction)
+            return None
+    except Exception as e:
+        st.error(f"Audio generation failed: {str(e)}")
+        # Return None instead of failing
+        return None
 
 # Streamlit UI
 st.title("AI Script Generator with Images and Audio")
@@ -474,25 +546,48 @@ if submit_button and theme:
             
             # Safely construct the narration text
             try:
-                full_text = script_data.get("title", f"Story about {theme}") + "\n\n"
-                
-                for chapter in script_data.get("chapters", []):
-                    if isinstance(chapter, dict) and "text" in chapter:
-                        clean_text = re.sub(r'\[IMAGE:.*?\]', '', chapter["text"])
-                        full_text += clean_text + "\n\n"
+                # Handle different script_data formats
+                if isinstance(script_data, dict):
+                    # Get title
+                    title = script_data.get("title", f"Story about {theme}")
+                    full_text = title + "\n\n"
+                    
+                    # Get chapters
+                    chapters = script_data.get("chapters", [])
+                    if isinstance(chapters, list):
+                        for chapter in chapters:
+                            if isinstance(chapter, dict) and "text" in chapter:
+                                # Clean the text (remove image markers)
+                                clean_text = re.sub(r'\[IMAGE:.*?\]', '', chapter["text"])
+                                full_text += clean_text + "\n\n"
+                    else:
+                        # If chapters is not a list, use a default text
+                        full_text += f"A story about {theme}.\n\n"
+                elif isinstance(script_data, str):
+                    # If script_data is a string, use it directly
+                    full_text = script_data
+                else:
+                    # For any other type, convert to string
+                    full_text = str(script_data)
                 
                 # Limit text length if needed
-                if len(full_text) > 10000:  # Arbitrary limit to avoid API issues
-                    full_text = full_text[:10000] + "...\n\nStory continues."
+                if len(full_text) > 5000:  # Reduced limit to avoid API issues
+                    full_text = full_text[:5000] + "...\n\nStory continues."
             except Exception as e:
                 debug_container.error(f"Error preparing narration text: {str(e)}")
                 full_text = f"A story about {theme}. Once upon a time..."
             
             debug_container.write("Generating audio narration...")
+            debug_container.write(f"Text length: {len(full_text)} characters")
+            debug_container.write(f"Voice: {voice_preference}")
             
             try:
                 audio_url = generate_audio(full_text, voice_preference)
-                debug_container.success("Audio generated successfully!")
+                if audio_url:
+                    debug_container.success("Audio generated successfully!")
+                else:
+                    debug_container.warning("Audio generation completed but returned no URL")
+                    audio_url = None
             except Exception as e:
                 debug_container.error(f"Audio generation failed: {str(e)}")
                 audio_url = None  # Continue without audio rather than failing completely
