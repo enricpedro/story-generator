@@ -4,12 +4,64 @@ import time
 import re
 import json
 import base64
+import io
+import zipfile
+from PIL import Image
 
 st.set_page_config(
     page_title="AI Script Generator with Images and Audio",
     page_icon="📝",
     layout="wide"
 )
+
+# Helper function to convert image URL to downloadable file
+def get_image_download_link(img_url, filename, text):
+    try:
+        response = requests.get(img_url)
+        if response.status_code == 200:
+            img_bytes = response.content
+            b64 = base64.b64encode(img_bytes).decode()
+            href = f'<a href="data:file/jpg;base64,{b64}" download="{filename}">📥 {text}</a>'
+            return href
+        else:
+            return f'<p>Error downloading image: {response.status_code}</p>'
+    except Exception as e:
+        return f'<p>Error: {str(e)}</p>'
+
+# Helper function to create a download link for text content
+def get_text_download_link(text, filename, link_text):
+    """Generate a link to download text content as a file"""
+    b64 = base64.b64encode(text.encode()).decode()
+    href = f'<a href="data:file/txt;base64,{b64}" download="{filename}">📥 {link_text}</a>'
+    return href
+
+# Helper function to create a download link for all images in a zip file
+def get_images_zip_download_link(image_urls, filename="story_images.zip"):
+    """Creates a zip file containing all images and generates a download link"""
+    try:
+        # Create a BytesIO object
+        zip_buffer = io.BytesIO()
+        
+        # Create a zip file in the BytesIO object
+        with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+            for i, img_url in enumerate(image_urls):
+                try:
+                    response = requests.get(img_url)
+                    if response.status_code == 200:
+                        img_data = response.content
+                        zip_file.writestr(f"image_{i+1}.jpg", img_data)
+                except Exception as e:
+                    st.warning(f"Could not add image {i+1} to zip: {str(e)}")
+        
+        # Reset the pointer of the BytesIO object to the beginning
+        zip_buffer.seek(0)
+        
+        # Create the download link
+        b64 = base64.b64encode(zip_buffer.getvalue()).decode()
+        href = f'<a href="data:application/zip;base64,{b64}" download="{filename}">📥 Download All Images (ZIP)</a>'
+        return href
+    except Exception as e:
+        return f'<p>Error creating zip file: {str(e)}</p>'
 
 # Set up the Replicate API
 if 'REPLICATE_API_TOKEN' in st.secrets:
@@ -422,6 +474,40 @@ def generate_audio(text, voice):
         # Return None instead of failing
         return None
 
+# Function to create a formatted script as plain text
+def get_script_as_text(script_data, theme):
+    """Convert script_data to a downloadable text format"""
+    try:
+        if isinstance(script_data, dict):
+            # Get title
+            title = script_data.get("title", f"Story about {theme}")
+            full_text = f"{title}\n\n"
+            
+            # Get chapters
+            chapters = script_data.get("chapters", [])
+            if isinstance(chapters, list):
+                for i, chapter in enumerate(chapters):
+                    if isinstance(chapter, dict) and "text" in chapter:
+                        full_text += f"Chapter {i+1}\n"
+                        full_text += "="*20 + "\n\n"
+                        
+                        # Clean the text (remove image markers)
+                        clean_text = re.sub(r'\[IMAGE:.*?\]', '', chapter["text"])
+                        full_text += clean_text + "\n\n"
+            else:
+                # If chapters is not a list, use a default text
+                full_text += f"A story about {theme}.\n\n"
+        elif isinstance(script_data, str):
+            # If script_data is a string, use it directly
+            full_text = script_data
+        else:
+            # For any other type, convert to string
+            full_text = str(script_data)
+            
+        return full_text
+    except Exception as e:
+        return f"Error formatting script: {str(e)}\n\nRaw data: {str(script_data)}"
+
 # Streamlit UI
 st.title("AI Script Generator with Images and Audio")
 
@@ -599,6 +685,7 @@ if submit_button and theme:
             st.session_state["script_data"] = script_data
             st.session_state["generated_images"] = generated_images
             st.session_state["audio_url"] = audio_url
+            st.session_state["theme"] = theme  # Save the theme for download filenames
             
             # Remove debug container after success
             # debug_container.empty()
@@ -612,12 +699,50 @@ if "script_data" in st.session_state:
     script_data = st.session_state["script_data"]
     generated_images = st.session_state.get("generated_images", [])
     audio_url = st.session_state.get("audio_url")
+    theme = st.session_state.get("theme", "story")
     
     # Display title
     if isinstance(script_data, dict) and "title" in script_data:
-        st.header(script_data["title"])
+        title = script_data["title"]
+        st.header(title)
     else:
-        st.header(f"Story about {theme}")
+        title = f"Story about {theme}"
+        st.header(title)
+    
+    # Create a download section
+    st.subheader("Download Content")
+    
+    # Create download columns
+    col1, col2, col3 = st.columns(3)
+    
+    # Download Script
+    with col1:
+        if isinstance(script_data, dict):
+            formatted_script = get_script_as_text(script_data, theme)
+            title_for_filename = title.replace(" ", "_").lower()
+            download_link = get_text_download_link(
+                formatted_script, 
+                f"{title_for_filename}.txt", 
+                "Download Script (TXT)"
+            )
+            st.markdown(download_link, unsafe_allow_html=True)
+    
+    # Download Images
+    with col2:
+        if generated_images:
+            image_urls = [img["url"] for img in generated_images if "url" in img]
+            if image_urls:
+                # Create download links for each image
+                zip_link = get_images_zip_download_link(
+                    image_urls, 
+                    f"{title.replace(' ', '_').lower()}_images.zip"
+                )
+                st.markdown(zip_link, unsafe_allow_html=True)
+    
+    # Download Audio
+    with col3:
+        if audio_url:
+            st.markdown(f"[Download Audio (MP3)]({audio_url})", unsafe_allow_html=True)
     
     # Audio player
     if audio_url:
@@ -652,9 +777,21 @@ if "script_data" in st.session_state:
                                                for j in range(chapter_idx) if j < len(script_data["chapters"])) + i
                                                
                                 if image_idx < len(generated_images):
-                                    st.image(generated_images[image_idx]["url"], 
-                                             caption=generated_images[image_idx].get("prompt", "Story image"),
-                                             use_column_width=True)
+                                    img_url = generated_images[image_idx]["url"]
+                                    img_prompt = generated_images[image_idx].get("prompt", "Story image")
+                                    
+                                    # Display image
+                                    st.image(img_url, caption=img_prompt, use_column_width=True)
+                                    
+                                    # Add individual image download link
+                                    st.markdown(
+                                        get_image_download_link(
+                                            img_url, 
+                                            f"image_{chapter_idx+1}_{i+1}.jpg", 
+                                            "Download this image"
+                                        ), 
+                                        unsafe_allow_html=True
+                                    )
                             except Exception as e:
                                 st.error(f"Error displaying image {image_idx}: {str(e)}")
                                 # Try to display any available image
@@ -679,13 +816,23 @@ if "script_data" in st.session_state:
         st.write(script_data)
         
         # Display any generated images
-        for img in generated_images:
+        for i, img in enumerate(generated_images):
             st.image(img["url"], caption=img.get("prompt", "Story image"), use_column_width=True)
+            
+            # Add individual image download link
+            st.markdown(
+                get_image_download_link(
+                    img["url"], 
+                    f"image_{i+1}.jpg", 
+                    "Download this image"
+                ), 
+                unsafe_allow_html=True
+            )
     
     # Button to create another story
     if st.button("Create Another Story"):
         # Clear the session state
-        for key in ["script_data", "generated_images", "audio_url"]:
+        for key in ["script_data", "generated_images", "audio_url", "theme"]:
             if key in st.session_state:
                 del st.session_state[key]
         st.experimental_rerun()
@@ -712,4 +859,15 @@ with st.sidebar:
     3. Add your Replicate API token as a secret
     
     The app will then be available online with its own URL.
+    """)
+    
+    st.header("Downloads")
+    st.write("""
+    You can download all generated content:
+    
+    - **Script (TXT)** - The complete story as plain text
+    - **Images (ZIP)** - All generated images as a ZIP file
+    - **Audio (MP3)** - The narrated story as an audio file
+    
+    Individual images can also be downloaded directly below each image.
     """)
