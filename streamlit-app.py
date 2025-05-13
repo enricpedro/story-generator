@@ -86,7 +86,7 @@ def generate_script(theme, num_chapters, style_preference):
             "Content-Type": "application/json"
         },
         json={
-            "version": "anthropic/claude-3-7-sonnet-20250219",
+            "version": "anthropic/claude-3-7-sonnet:20250219",
             "input": {
                 "prompt": prompt
             }
@@ -145,7 +145,7 @@ def generate_image(prompt, theme, style_preference):
             "Content-Type": "application/json"
         },
         json={
-            "version": "black-forest-labs/flux-schnell",
+            "version": "black-forest-labs/flux-schnell:7724c21c7d3be7a0498b64899fb10b161a9c5fc327e75ada983c492b3901886b",
             "input": {
                 "prompt": full_prompt,
                 "width": 768,
@@ -188,7 +188,7 @@ def generate_audio(text, voice):
             "Content-Type": "application/json"
         },
         json={
-            "version": "jaaari/kokoro-82m",
+            "version": "jaaari/kokoro-82m:dfdf537ba482b029e0a761699e6f55e9162cfd159270bfe0e44857caa5f275a6",
             "input": {
                 "text": text,
                 "voice": voice,
