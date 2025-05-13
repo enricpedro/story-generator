@@ -27,7 +27,7 @@ def wait_for_prediction(prediction_id):
             response = requests.get(
                 f"https://api.replicate.com/v1/predictions/{prediction_id}",
                 headers={
-                    "Authorization": f"Token {REPLICATE_API_TOKEN}",
+                    "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
                     "Content-Type": "application/json"
                 }
             )
@@ -80,16 +80,16 @@ def generate_script(theme, num_chapters, style_preference):
     
     # Call Claude 3.7 Sonnet via Replicate API
     response = requests.post(
-        "https://api.replicate.com/v1/predictions",
+        "https://api.replicate.com/v1/models/anthropic/claude-3.7-sonnet/predictions",
         headers={
-            "Authorization": f"Token {REPLICATE_API_TOKEN}",
+            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
             "Content-Type": "application/json"
         },
         json={
-            "version": "anthropic/claude-3-7-sonnet:20250219",
             "input": {
                 "prompt": prompt
-            }
+            },
+            "stream": False
         }
     )
     
@@ -139,13 +139,12 @@ def generate_image(prompt, theme, style_preference):
     full_prompt = f"{theme}, {prompt}, {style_preference} style, highly detailed"
     
     response = requests.post(
-        "https://api.replicate.com/v1/predictions",
+        "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
         headers={
-            "Authorization": f"Token {REPLICATE_API_TOKEN}",
+            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
             "Content-Type": "application/json"
         },
         json={
-            "version": "black-forest-labs/flux-schnell:7724c21c7d3be7a0498b64899fb10b161a9c5fc327e75ada983c492b3901886b",
             "input": {
                 "prompt": full_prompt,
                 "width": 768,
@@ -182,13 +181,12 @@ def generate_image(prompt, theme, style_preference):
 def generate_audio(text, voice):
     """Generate audio with Kokoro"""
     response = requests.post(
-        "https://api.replicate.com/v1/predictions",
+        "https://api.replicate.com/v1/models/jaaari/kokoro-82m/predictions",
         headers={
-            "Authorization": f"Token {REPLICATE_API_TOKEN}",
+            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
             "Content-Type": "application/json"
         },
         json={
-            "version": "jaaari/kokoro-82m:dfdf537ba482b029e0a761699e6f55e9162cfd159270bfe0e44857caa5f275a6",
             "input": {
                 "text": text,
                 "voice": voice,
@@ -239,7 +237,7 @@ with debug_expander:
         try:
             response = requests.get(
                 "https://api.replicate.com/v1/models",
-                headers={"Authorization": f"Token {REPLICATE_API_TOKEN}"}
+                headers={"Authorization": f"Bearer {REPLICATE_API_TOKEN}"}
             )
             if response.status_code == 200:
                 st.success("Connection to Replicate API successful!")
