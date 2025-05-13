@@ -22,20 +22,39 @@ else:
 
 def wait_for_prediction(prediction_id):
     """Poll for prediction results until ready"""
-    while True:
-        response = requests.get(
-            f"https://api.replicate.com/v1/predictions/{prediction_id}",
-            headers={
-                "Authorization": f"Token {REPLICATE_API_TOKEN}",
-                "Content-Type": "application/json"
-            }
-        )
-        prediction = response.json()
-        if prediction["status"] == "succeeded":
-            return prediction
-        elif prediction["status"] == "failed":
-            raise Exception(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
-        time.sleep(1)
+    try:
+        while True:
+            response = requests.get(
+                f"https://api.replicate.com/v1/predictions/{prediction_id}",
+                headers={
+                    "Authorization": f"Token {REPLICATE_API_TOKEN}",
+                    "Content-Type": "application/json"
+                }
+            )
+            
+            # Check if the request was successful
+            if response.status_code != 200:
+                st.error(f"Error: API returned status code {response.status_code}")
+                st.write("Response:", response.text)
+                raise Exception(f"API error: {response.status_code} - {response.text}")
+            
+            prediction = response.json()
+            
+            if prediction["status"] == "succeeded":
+                return prediction
+            elif prediction["status"] == "failed":
+                st.error(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
+                st.write("Full error response:", prediction)
+                raise Exception(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
+            
+            # Add debug info about status
+            status_placeholder = st.empty()
+            status_placeholder.write(f"Current status: {prediction['status']}")
+            
+            time.sleep(2)
+    except Exception as e:
+        st.error(f"Error in wait_for_prediction: {str(e)}")
+        raise
 
 def generate_script(theme, num_chapters, style_preference):
     """Generate script with Claude 3.7 Sonnet"""
@@ -74,9 +93,26 @@ def generate_script(theme, num_chapters, style_preference):
         }
     )
     
+    # Check if the request was successful
+    if response.status_code != 200:
+        st.error(f"Error: API returned status code {response.status_code}")
+        st.write("Response:", response.text)
+        raise Exception(f"API error: {response.status_code} - {response.text}")
+    
     prediction = response.json()
+    
+    # Debug information
+    st.write("API response:", prediction)
+    
+    # Check for errors in the response
     if "error" in prediction:
         raise Exception(f"Error creating prediction: {prediction['error']}")
+    
+    # Check if 'id' exists in the response
+    if "id" not in prediction:
+        st.error("API response does not contain an 'id' field")
+        st.write("Full API response:", prediction)
+        raise Exception("Invalid API response: missing 'id' field")
     
     # Wait for the prediction to complete
     prediction = wait_for_prediction(prediction["id"])
@@ -120,9 +156,23 @@ def generate_image(prompt, theme, style_preference):
         }
     )
     
+    # Check if the request was successful
+    if response.status_code != 200:
+        st.error(f"Error: API returned status code {response.status_code}")
+        st.write("Response:", response.text)
+        raise Exception(f"API error: {response.status_code} - {response.text}")
+    
     prediction = response.json()
+    
+    # Check for errors in the response
     if "error" in prediction:
         raise Exception(f"Error creating prediction: {prediction['error']}")
+    
+    # Check if 'id' exists in the response
+    if "id" not in prediction:
+        st.error("API response does not contain an 'id' field")
+        st.write("Full API response:", prediction)
+        raise Exception("Invalid API response: missing 'id' field")
     
     # Wait for the prediction to complete
     prediction = wait_for_prediction(prediction["id"])
@@ -147,9 +197,23 @@ def generate_audio(text, voice):
         }
     )
     
+    # Check if the request was successful
+    if response.status_code != 200:
+        st.error(f"Error: API returned status code {response.status_code}")
+        st.write("Response:", response.text)
+        raise Exception(f"API error: {response.status_code} - {response.text}")
+    
     prediction = response.json()
+    
+    # Check for errors in the response
     if "error" in prediction:
         raise Exception(f"Error creating prediction: {prediction['error']}")
+    
+    # Check if 'id' exists in the response
+    if "id" not in prediction:
+        st.error("API response does not contain an 'id' field")
+        st.write("Full API response:", prediction)
+        raise Exception("Invalid API response: missing 'id' field")
     
     # Wait for the prediction to complete
     prediction = wait_for_prediction(prediction["id"])
@@ -158,6 +222,32 @@ def generate_audio(text, voice):
 
 # Streamlit UI
 st.title("AI Script Generator with Images and Audio")
+
+# Display debugging info
+st.sidebar.header("Debug Information")
+debug_expander = st.sidebar.expander("API Token Status")
+with debug_expander:
+    if REPLICATE_API_TOKEN:
+        # Only show the first and last 4 characters
+        token_preview = REPLICATE_API_TOKEN[:4] + "..." + REPLICATE_API_TOKEN[-4:]
+        st.success(f"API Token is set: {token_preview}")
+    else:
+        st.error("API Token is not set")
+    
+    # Test API connection
+    if st.button("Test API Connection"):
+        try:
+            response = requests.get(
+                "https://api.replicate.com/v1/models",
+                headers={"Authorization": f"Token {REPLICATE_API_TOKEN}"}
+            )
+            if response.status_code == 200:
+                st.success("Connection to Replicate API successful!")
+            else:
+                st.error(f"Connection failed with status code: {response.status_code}")
+                st.text(response.text)
+        except Exception as e:
+            st.error(f"Connection error: {str(e)}")
 
 with st.form("input_form"):
     theme = st.text_input("Story Theme or Topic:", placeholder="e.g., Space adventure, Medieval fantasy, Underwater exploration")
@@ -209,7 +299,19 @@ if submit_button and theme:
             
             # Step 1: Generate script
             status_text.text("Generating script...")
-            script_data = generate_script(theme, num_chapters, style_preference)
+            
+            # Debug mode to show exact API calls
+            debug_container = st.container()
+            with debug_container:
+                st.write("Making API call to Claude 3.7 Sonnet...")
+                
+            try:
+                script_data = generate_script(theme, num_chapters, style_preference)
+                debug_container.success("Script generated successfully!")
+            except Exception as e:
+                debug_container.error(f"Script generation failed: {str(e)}")
+                raise e
+            
             progress_bar.progress(30)
             
             # Step 2: Generate images
@@ -218,11 +320,22 @@ if submit_button and theme:
             for chapter in script_data["chapters"]:
                 all_image_prompts.extend(chapter["image_prompts"])
             
+            debug_container.write(f"Found {len(all_image_prompts)} image prompts")
+            
             generated_images = []
             for i, prompt in enumerate(all_image_prompts):
                 status_text.text(f"Creating image {i+1} of {len(all_image_prompts)}...")
-                image_url = generate_image(prompt, theme, style_preference)
-                generated_images.append({"url": image_url, "prompt": prompt})
+                debug_container.write(f"Generating image for prompt: {prompt}")
+                
+                try:
+                    image_url = generate_image(prompt, theme, style_preference)
+                    generated_images.append({"url": image_url, "prompt": prompt})
+                    debug_container.success(f"Image {i+1} generated!")
+                except Exception as e:
+                    debug_container.error(f"Image {i+1} generation failed: {str(e)}")
+                    # Continue with other images instead of stopping completely
+                    continue
+                
                 progress_bar.progress(30 + int((i+1) / len(all_image_prompts) * 50))
             
             # Step 3: Generate audio
@@ -232,7 +345,15 @@ if submit_button and theme:
                 clean_text = re.sub(r'\[IMAGE:.*?\]', '', chapter["text"])
                 full_text += clean_text + "\n\n"
             
-            audio_url = generate_audio(full_text, voice_preference)
+            debug_container.write("Generating audio narration...")
+            
+            try:
+                audio_url = generate_audio(full_text, voice_preference)
+                debug_container.success("Audio generated successfully!")
+            except Exception as e:
+                debug_container.error(f"Audio generation failed: {str(e)}")
+                audio_url = None  # Continue without audio rather than failing completely
+            
             progress_bar.progress(100)
             status_text.text("Complete!")
             
@@ -241,8 +362,12 @@ if submit_button and theme:
             st.session_state["generated_images"] = generated_images
             st.session_state["audio_url"] = audio_url
             
+            # Remove debug container after success
+            debug_container.empty()
+            
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
+        st.write("Please check your API token and try again.")
 
 # Display results
 if "script_data" in st.session_state:
