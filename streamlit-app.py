@@ -1,52 +1,4 @@
-def handle_streaming_response(response, prediction_id):
-    """Handle a streaming response from Replicate API"""
-    try:
-        # If the response contains a URL for streaming, fetch the content from that URL
-        if "stream" in response and response["stream"]:
-            stream_url = response["stream"]
-            st.write(f"Stream URL: {stream_url}")
-            
-            headers = {
-                "Accept": "text/event-stream",
-                "Cache-Control": "no-store",
-                "Authorization": f"Bearer {REPLICATE_API_TOKEN}"
-            }
-            
-            stream_response = requests.get(stream_url, headers=headers, stream=True)
-            
-            # Check if the streaming request was successful
-            if stream_response.status_code != 200:
-                st.error(f"Error: Stream API returned status code {stream_response.status_code}")
-                st.write("Response:", stream_response.text)
-                return None
-            
-            full_text = ""
-            for line in stream_response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data:'):
-                        data = decoded_line[5:].strip()
-                        if data != "[DONE]":
-                            try:
-                                json_data = json.loads(data)
-                                if "output" in json_data:
-                                    current_text = json_data["output"]
-                                    full_text += current_text
-                                    # Display the streaming output
-                                    st.write(current_text)
-                            except json.JSONDecodeError:
-                                st.error(f"Failed to parse JSON: {data}")
-                                continue
-            
-            return {"output": full_text}
-        
-        # Otherwise, wait for the prediction to complete using regular polling
-        return wait_for_prediction(prediction_id)
-        
-    except Exception as e:
-        st.error(f"Error in handle_streaming_response: {str(e)}")
-        # Fall back to regular polling
-        return wait_for_prediction(prediction_id)import streamlit as st
+import streamlit as st
 import requests
 import time
 import re
@@ -118,6 +70,56 @@ def wait_for_prediction(prediction_id):
     except Exception as e:
         st.error(f"Error in wait_for_prediction: {str(e)}")
         raise
+
+def handle_streaming_response(response, prediction_id):
+    """Handle a streaming response from Replicate API"""
+    try:
+        # If the response contains a URL for streaming, fetch the content from that URL
+        if "stream" in response and response["stream"]:
+            stream_url = response["stream"]
+            st.write(f"Stream URL: {stream_url}")
+            
+            headers = {
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-store",
+                "Authorization": f"Bearer {REPLICATE_API_TOKEN}"
+            }
+            
+            stream_response = requests.get(stream_url, headers=headers, stream=True)
+            
+            # Check if the streaming request was successful
+            if stream_response.status_code != 200:
+                st.error(f"Error: Stream API returned status code {stream_response.status_code}")
+                st.write("Response:", stream_response.text)
+                return None
+            
+            full_text = ""
+            for line in stream_response.iter_lines():
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith('data:'):
+                        data = decoded_line[5:].strip()
+                        if data != "[DONE]":
+                            try:
+                                json_data = json.loads(data)
+                                if "output" in json_data:
+                                    current_text = json_data["output"]
+                                    full_text += current_text
+                                    # Display the streaming output
+                                    st.write(current_text)
+                            except json.JSONDecodeError:
+                                st.error(f"Failed to parse JSON: {data}")
+                                continue
+            
+            return {"output": full_text}
+        
+        # Otherwise, wait for the prediction to complete using regular polling
+        return wait_for_prediction(prediction_id)
+        
+    except Exception as e:
+        st.error(f"Error in handle_streaming_response: {str(e)}")
+        # Fall back to regular polling
+        return wait_for_prediction(prediction_id)
 
 def generate_script(theme, num_chapters, style_preference):
     """Generate script with Claude 3.7 Sonnet"""
@@ -209,23 +211,6 @@ def generate_script(theme, num_chapters, style_preference):
         st.error(f"Error parsing script data: {str(e)}")
         st.write("Raw output:", prediction_output.get("output", "No output available"))
         raise Exception(f"Failed to parse script data: {str(e)}")
-    
-    # Parse the JSON result
-    try:
-        script_data = json.loads(prediction["output"])
-        return script_data
-    except:
-        # Attempt to extract JSON if Claude didn't output pure JSON
-        output = prediction["output"]
-        match = re.search(r'({[\s\S]*})', output)
-        if match:
-            try:
-                script_data = json.loads(match.group(1))
-                return script_data
-            except:
-                raise Exception("Failed to parse script data from Claude's output")
-        else:
-            raise Exception("Could not extract JSON from Claude's output")
 
 def generate_image(prompt, theme, style_preference):
     """Generate image with Flux Schnell"""
@@ -379,7 +364,7 @@ with st.form("input_form"):
             options=[
                 "af_scarlett", "af_bella", "af_sky", "af_nova",
                 "af_river", "af_zoe", "af_heart", "af_oren",
-                "af_reed", "af_kai", "af_theo"
+                "af_reed", "af_kai", "af_theo", "af_nicole"
             ],
             format_func=lambda x: {
                 "af_scarlett": "Scarlett (Female)",
@@ -393,6 +378,7 @@ with st.form("input_form"):
                 "af_reed": "Reed (Male)",
                 "af_kai": "Kai (Male)",
                 "af_theo": "Theo (Male)",
+                "af_nicole": "Nicole (Female)"
             }[x],
             index=0
         )
@@ -487,9 +473,10 @@ if "script_data" in st.session_state:
     st.header(script_data["title"])
     
     # Audio player
-    st.subheader("Audio Narration")
-    st.audio(audio_url)
-    st.markdown(f"[Download Audio]({audio_url})")
+    if audio_url:
+        st.subheader("Audio Narration")
+        st.audio(audio_url)
+        st.markdown(f"[Download Audio]({audio_url})")
     
     # Display chapters with images
     for chapter_idx, chapter in enumerate(script_data["chapters"]):
