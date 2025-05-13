@@ -1,4 +1,52 @@
-import streamlit as st
+def handle_streaming_response(response, prediction_id):
+    """Handle a streaming response from Replicate API"""
+    try:
+        # If the response contains a URL for streaming, fetch the content from that URL
+        if "stream" in response and response["stream"]:
+            stream_url = response["stream"]
+            st.write(f"Stream URL: {stream_url}")
+            
+            headers = {
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-store",
+                "Authorization": f"Bearer {REPLICATE_API_TOKEN}"
+            }
+            
+            stream_response = requests.get(stream_url, headers=headers, stream=True)
+            
+            # Check if the streaming request was successful
+            if stream_response.status_code != 200:
+                st.error(f"Error: Stream API returned status code {stream_response.status_code}")
+                st.write("Response:", stream_response.text)
+                return None
+            
+            full_text = ""
+            for line in stream_response.iter_lines():
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith('data:'):
+                        data = decoded_line[5:].strip()
+                        if data != "[DONE]":
+                            try:
+                                json_data = json.loads(data)
+                                if "output" in json_data:
+                                    current_text = json_data["output"]
+                                    full_text += current_text
+                                    # Display the streaming output
+                                    st.write(current_text)
+                            except json.JSONDecodeError:
+                                st.error(f"Failed to parse JSON: {data}")
+                                continue
+            
+            return {"output": full_text}
+        
+        # Otherwise, wait for the prediction to complete using regular polling
+        return wait_for_prediction(prediction_id)
+        
+    except Exception as e:
+        st.error(f"Error in handle_streaming_response: {str(e)}")
+        # Fall back to regular polling
+        return wait_for_prediction(prediction_id)import streamlit as st
 import requests
 import time
 import re
@@ -40,17 +88,32 @@ def wait_for_prediction(prediction_id):
             
             prediction = response.json()
             
-            if prediction["status"] == "succeeded":
-                return prediction
-            elif prediction["status"] == "failed":
-                st.error(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
-                st.write("Full error response:", prediction)
-                raise Exception(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
-            
-            # Add debug info about status
+            # Show current status for debugging
             status_placeholder = st.empty()
-            status_placeholder.write(f"Current status: {prediction['status']}")
+            if "status" in prediction:
+                status_placeholder.write(f"Current status: {prediction['status']}")
+            else:
+                status_placeholder.write(f"Current status: Unknown")
+                st.write("Full response:", prediction)
             
+            # Check prediction status
+            if "status" in prediction:
+                if prediction["status"] == "succeeded":
+                    return prediction
+                elif prediction["status"] == "failed":
+                    st.error(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
+                    st.write("Full error response:", prediction)
+                    raise Exception(f"Prediction failed: {prediction.get('error', 'Unknown error')}")
+                elif prediction["status"] == "canceled":
+                    st.error("Prediction was canceled")
+                    st.write("Full response:", prediction)
+                    raise Exception("Prediction was canceled")
+            else:
+                st.error("No status field in prediction response")
+                st.write("Full response:", prediction)
+                raise Exception("Invalid API response format - missing status field")
+            
+            # Wait before polling again
             time.sleep(2)
     except Exception as e:
         st.error(f"Error in wait_for_prediction: {str(e)}")
@@ -89,12 +152,12 @@ def generate_script(theme, num_chapters, style_preference):
             "input": {
                 "prompt": prompt
             },
-            "stream": False
+            "stream": True
         }
     )
     
-    # Check if the request was successful
-    if response.status_code != 200:
+    # Check if the request was created successfully (201 is the expected response code)
+    if response.status_code not in [200, 201]:
         st.error(f"Error: API returned status code {response.status_code}")
         st.write("Response:", response.text)
         raise Exception(f"API error: {response.status_code} - {response.text}")
@@ -102,10 +165,10 @@ def generate_script(theme, num_chapters, style_preference):
     prediction = response.json()
     
     # Debug information
-    st.write("API response:", prediction)
+    st.write("Initial API response:", prediction)
     
     # Check for errors in the response
-    if "error" in prediction:
+    if "error" in prediction and prediction["error"]:
         raise Exception(f"Error creating prediction: {prediction['error']}")
     
     # Check if 'id' exists in the response
@@ -114,8 +177,38 @@ def generate_script(theme, num_chapters, style_preference):
         st.write("Full API response:", prediction)
         raise Exception("Invalid API response: missing 'id' field")
     
-    # Wait for the prediction to complete
-    prediction = wait_for_prediction(prediction["id"])
+    # Handle streaming response or wait for prediction to complete
+    prediction_output = handle_streaming_response(prediction, prediction["id"])
+    
+    # Parse the JSON result from the output field
+    try:
+        if prediction_output and "output" in prediction_output:
+            if isinstance(prediction_output["output"], str):
+                # Try to parse string as JSON
+                try:
+                    script_data = json.loads(prediction_output["output"])
+                    return script_data
+                except json.JSONDecodeError:
+                    # If not valid JSON, look for a JSON object in the string
+                    match = re.search(r'({[\s\S]*})', prediction_output["output"])
+                    if match:
+                        script_data = json.loads(match.group(1))
+                        return script_data
+                    else:
+                        st.error("Could not extract JSON from output")
+                        st.write("Raw output:", prediction_output["output"])
+                        raise Exception("Failed to parse JSON from output")
+            else:
+                # Direct JSON object
+                return prediction_output["output"]
+        else:
+            st.error("No output field in prediction result")
+            st.write("Full prediction:", prediction_output)
+            raise Exception("No output field in prediction result")
+    except Exception as e:
+        st.error(f"Error parsing script data: {str(e)}")
+        st.write("Raw output:", prediction_output.get("output", "No output available"))
+        raise Exception(f"Failed to parse script data: {str(e)}")
     
     # Parse the JSON result
     try:
@@ -142,7 +235,8 @@ def generate_image(prompt, theme, style_preference):
         "https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions",
         headers={
             "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Prefer": "wait"
         },
         json={
             "input": {
@@ -155,8 +249,8 @@ def generate_image(prompt, theme, style_preference):
         }
     )
     
-    # Check if the request was successful
-    if response.status_code != 200:
+    # Check if the request was created successfully (201 is the expected response code)
+    if response.status_code not in [200, 201]:
         st.error(f"Error: API returned status code {response.status_code}")
         st.write("Response:", response.text)
         raise Exception(f"API error: {response.status_code} - {response.text}")
@@ -164,7 +258,7 @@ def generate_image(prompt, theme, style_preference):
     prediction = response.json()
     
     # Check for errors in the response
-    if "error" in prediction:
+    if "error" in prediction and prediction["error"]:
         raise Exception(f"Error creating prediction: {prediction['error']}")
     
     # Check if 'id' exists in the response
@@ -176,17 +270,28 @@ def generate_image(prompt, theme, style_preference):
     # Wait for the prediction to complete
     prediction = wait_for_prediction(prediction["id"])
     
-    return prediction["output"]
+    # Extract the output URL
+    if "output" in prediction:
+        if isinstance(prediction["output"], list) and len(prediction["output"]) > 0:
+            return prediction["output"][0]  # First image from the list
+        else:
+            return prediction["output"]  # Direct output URL
+    else:
+        st.error("No output URL in prediction result")
+        st.write("Full prediction:", prediction)
+        raise Exception("No output URL in prediction result")
 
 def generate_audio(text, voice):
     """Generate audio with Kokoro"""
     response = requests.post(
-        "https://api.replicate.com/v1/models/jaaari/kokoro-82m/predictions",
+        "https://api.replicate.com/v1/predictions",
         headers={
             "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Prefer": "wait"
         },
         json={
+            "version": "jaaari/kokoro-82m:f559560eb822dc509045f3921a192123491b9173d4bf3daab2169b71c7a13",
             "input": {
                 "text": text,
                 "voice": voice,
@@ -195,8 +300,8 @@ def generate_audio(text, voice):
         }
     )
     
-    # Check if the request was successful
-    if response.status_code != 200:
+    # Check if the request was created successfully (201 is the expected response code)
+    if response.status_code not in [200, 201]:
         st.error(f"Error: API returned status code {response.status_code}")
         st.write("Response:", response.text)
         raise Exception(f"API error: {response.status_code} - {response.text}")
@@ -204,7 +309,7 @@ def generate_audio(text, voice):
     prediction = response.json()
     
     # Check for errors in the response
-    if "error" in prediction:
+    if "error" in prediction and prediction["error"]:
         raise Exception(f"Error creating prediction: {prediction['error']}")
     
     # Check if 'id' exists in the response
@@ -216,7 +321,13 @@ def generate_audio(text, voice):
     # Wait for the prediction to complete
     prediction = wait_for_prediction(prediction["id"])
     
-    return prediction["output"]
+    # Extract the output URL
+    if "output" in prediction:
+        return prediction["output"]
+    else:
+        st.error("No output URL in prediction result")
+        st.write("Full prediction:", prediction)
+        raise Exception("No output URL in prediction result")
 
 # Streamlit UI
 st.title("AI Script Generator with Images and Audio")
